@@ -1,6 +1,6 @@
 ### BLE CONNECT
 
-A simple script to facilitate the discovery of Bluetooth Low Energy (BLE) GATT Services and Characteristics. 
+A simple script to facilitate the discovery of devices running Bluetooth Low Energy (BLE) and their GATT Services and Characteristics. 
 
 ### Install 
 Run:
