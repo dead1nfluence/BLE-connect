@@ -8,22 +8,6 @@ from bleak.exc import BleakError
 # Store subscribed characteristics
 subscribed_chars = set()
 
-def handle_prompt_fields(cmd_meta):
-    data = {}
-    for field in cmd_meta.get("prompt", []):
-        val = input(f"{field}: ")
-        data[field.lower()] = val
-    return data
-
-def build_command(cmd_code, device_id, data=None):
-    payload = {
-        "c": cmd_code,
-        "d": {"device_id": device_id}
-    }
-    if data:
-        payload["d"].update(data)
-    return json.dumps(payload).encode()
-
 def notification_handler(sender, data):
     """Handle incoming notifications from subscribed characteristics"""
     print(f"[Notification] From {sender}: {data.decode(errors='ignore')}")
@@ -31,10 +15,10 @@ def notification_handler(sender, data):
 def print_scan_help():
     """Display help menu for device scanning"""
     print("\nScanning commands:")
-    print("  <number>                - Select a device to connect (e.g., 0, 1, ...)")
+    print("  <number>                - Select a device to connect to (e.g., 0, 1, ...)")
     print("  help                    - Display this help message")
     print("  refresh                 - Re-scan for nearby BLE devices")
-    print("  quit                    - Exit the script")
+    print("  exit                    - Exit the script (same as quit)")
     print()
 
 async def scan_for_ble():
@@ -51,10 +35,10 @@ async def scan_for_ble():
         
         while True:
             try:
-                choice = input("Select device to connect (number) or command: ").strip().lower()
+                choice = input("Select device to connect to (number) or enter a command: ").strip().lower()
                 if choice == "help":
                     print_scan_help()
-                elif choice == "quit":
+                elif choice in ("quit", "exit"):
                     print("[-] Exiting script.")
                     return None
                 elif choice == "refresh":
@@ -71,72 +55,85 @@ async def scan_for_ble():
                 print("\n[-] Exiting script.")
                 return None
 
-def print_available_characteristics(client):
-    """Display available GATT services and characteristics"""
+def list_available_characteristics(client):
+    """List all characteristics, numbering those with read, notify, or indicate"""
     print("\n[+] Available GATT Services and Characteristics:")
+    actionable_chars = []
+    char_index = 0
     for service in client.services:
         print(f" [Service] {service.uuid}")
         for char in service.characteristics:
             props = ', '.join(char.properties)
-            print(f" └── [Char] {char.uuid} ({props})")
+            if 'read' in char.properties or 'notify' in char.properties or 'indicate' in char.properties:
+                print(f" └── [{char_index}] {char.uuid} ({props})")
+                actionable_chars.append((char.uuid, char.properties))
+                char_index += 1
+            else:
+                print(f" └── {char.uuid} ({props})")
+    if not actionable_chars:
+        print("[-] No characteristics with read, notify, or indicate properties found.")
+    else:
+        print(f"[*] {char_index} actionable characteristics listed above (use for read/subscribe).")
     print()
+    return actionable_chars
 
-async def subscribe_to_characteristic(client, char_uuid):
-    """Subscribe to a characteristic if it supports notify or indicate"""
+async def read_characteristic_by_index(client, index, actionable_chars):
+    """Read from a characteristic by its index"""
+    if not actionable_chars:
+        print("[-] No readable characteristics available. Use 'list' to view characteristics.")
+        return
+    if not isinstance(index, int) or index < 0 or index >= len(actionable_chars):
+        print("[-] Invalid characteristic number. Available characteristics:")
+        list_available_characteristics(client)
+        return
+    uuid, props = actionable_chars[index]
+    if 'read' not in props:
+        print(f"[-] Characteristic {uuid} does not support read")
+        return
     try:
-        for service in client.services:
-            for char in service.characteristics:
-                if char.uuid.lower() == char_uuid.lower():
-                    if 'notify' in char.properties or 'indicate' in char.properties:
-                        await client.start_notify(char_uuid, notification_handler)
-                        subscribed_chars.add(char_uuid.lower())
-                        print(f"[*] Subscribed to {char_uuid}")
-                        return True
-                    else:
-                        print(f"[-] Characteristic {char_uuid} does not support notify or indicate")
-                        return False
-        print(f"[-] Characteristic {char_uuid} not found")
-        return False
+        value = await client.read_gatt_char(uuid)
+        print(f"[<] Read from {uuid}: {value.decode(errors='ignore')}")
     except Exception as e:
-        print(f"[-] Error subscribing to {char_uuid}: {e}")
-        return False
+        print(f"[-] Error reading from {uuid}: {e}")
 
-async def read_characteristic(client, char_uuid):
-    """Read from a characteristic if it supports read"""
+async def subscribe_to_characteristic_by_index(client, index, actionable_chars):
+    """Subscribe to a characteristic by its index"""
+    if not actionable_chars:
+        print("[-] No subscribable characteristics available. Use 'list' to view characteristics.")
+        return
+    if not isinstance(index, int) or index < 0 or index >= len(actionable_chars):
+        print("[-] Invalid characteristic number. Available characteristics:")
+        list_available_characteristics(client)
+        return
+    uuid, props = actionable_chars[index]
+    if 'notify' not in props and 'indicate' not in props:
+        print(f"[-] Characteristic {uuid} does not support notify or indicate")
+        return
     try:
-        for service in client.services:
-            for char in service.characteristics:
-                if char.uuid.lower() == char_uuid.lower():
-                    if 'read' in char.properties:
-                        value = await client.read_gatt_char(char_uuid)
-                        print(f"[<] Read from {char_uuid}: {value.decode(errors='ignore')}")
-                        return True
-                    else:
-                        print(f"[-] Characteristic {char_uuid} does not support read")
-                        return False
-        print(f"[-] Characteristic {char_uuid} not found")
-        return False
+        await client.start_notify(uuid, notification_handler)
+        subscribed_chars.add(uuid.lower())
+        print(f"[*] Subscribed to {uuid}")
     except Exception as e:
-        print(f"[-] Error reading from {char_uuid}: {e}")
-        return False
+        print(f"[-] Error subscribing to {uuid}: {e}")
 
 def print_help():
     """Display available commands and their format"""
     print("\nAvailable commands:")
     print("  help                    - Display this help message")
-    print("  subscribe <UUID>        - Subscribe to notifications from a characteristic")
-    print("  read <UUID>             - Read value from a characteristic")
-    print("  quit                    - Disconnect from the device")
+    print("  list                    - List all characteristics with numbered actionable ones")
+    print("  subscribe <number>      - Subscribe to a numbered characteristic (notify/indicate)")
+    print("  read <number>           - Read value from a numbered characteristic")
     print("  exit                    - Disconnect from the device (same as quit)")
-    print("\nExample UUID format: 00002a00-0000-1000-8000-00805f9b34fb")
+    print("  rescan                  - Disconnect and return to device scan")
+    print("\nExample: read 0, subscribe 1")
     print()
 
 async def interact_with_device(address):
     try:
         async with BleakClient(address, timeout=10.0) as client:
             print("[*] Connected to", address)
-            # Print all available characteristics right after connection
-            print_available_characteristics(client)  # Removed 'await' since function is not async
+            # List all characteristics, numbering actionable ones
+            actionable_chars = list_available_characteristics(client)
             print("Successfully connected. Type 'help' for commands.")
             
             while True:
@@ -159,19 +156,42 @@ async def interact_with_device(address):
                                 print(f"[-] Error unsubscribing from {char_uuid}: {e}")
                         break
 
+                    elif command == "rescan":
+                        # Unsubscribe from all characteristics before disconnecting
+                        for char_uuid in subscribed_chars.copy():
+                            try:
+                                await client.stop_notify(char_uuid)
+                                subscribed_chars.remove(char_uuid)
+                                print(f"[*] Unsubscribed from {char_uuid}")
+                            except Exception as e:
+                                print(f"[-] Error unsubscribing from {char_uuid}: {e}")
+                        print("[*] Disconnecting to rescan...")
+                        return False  # Return False to trigger rescan
+
                     elif command == "help":
                         print_help()
 
-                    elif command == "subscribe" and len(parts) == 2:
-                        char_uuid = parts[1]
-                        await subscribe_to_characteristic(client, char_uuid)
+                    elif command == "list":
+                        list_available_characteristics(client)
 
-                    elif command == "read" and len(parts) == 2:
-                        char_uuid = parts[1]
-                        await read_characteristic(client, char_uuid)
+                    elif command == "subscribe":
+                        if len(parts) != 2 or not parts[1].isdigit():
+                            print("[-] Invalid format. Use: subscribe <number>")
+                            list_available_characteristics(client)
+                        else:
+                            index = int(parts[1])
+                            await subscribe_to_characteristic_by_index(client, index, actionable_chars)
+
+                    elif command == "read":
+                        if len(parts) != 2 or not parts[1].isdigit():
+                            print("[-] Invalid format. Use: read <number>")
+                            list_available_characteristics(client)
+                        else:
+                            index = int(parts[1])
+                            await read_characteristic_by_index(client, index, actionable_chars)
 
                     else:
-                        print("[-] Invalid command. Type 'help' for available commands.")
+                        print("[-] Invalid command. Type 'help' for commands.")
 
                 except KeyboardInterrupt:
                     print("\n[*] Disconnecting...")
